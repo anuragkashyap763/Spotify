@@ -1,0 +1,120 @@
+/* This is utility class is nothing but some properties which will be used with everyone */
+.border {
+  border: 2px solid red;
+  margin: 3px;
+}
+.flex {
+  display: flex;
+}
+.justify-center {
+  justify-content: center;
+}
+.items-center {
+  align-items: center;
+}
+
+.rounded {
+  border-radius: 7px;
+}
+.m-1 {
+  margin: 5px;
+}
+.p-1 {
+  padding: 20px;
+}
+
+.bg-black {
+  background-color: black;
+  color: white;
+}
+.bg-grey {
+  background-color: #1a1a1a;
+}
+.invert {
+  filter: invert(1);
+}
+/* Chrome, Safari, Edge */
+body::-webkit-scrollbar {
+  width: 12px;
+}
+
+body::-webkit-scrollbar-thumb {
+  background-color: #333; /* thumb */
+  border-radius: 6px;
+}
+
+body::-webkit-scrollbar-track {
+  background-color: #222; /* track */
+}
+
+/* Firefox */
+html {
+  scrollbar-color: #333 #222; /* thumb, track */
+  scrollbar-width: thin; /* optional */
+}
+
+.cardContainer {
+  /* max-height: 400px;       or whatever height you want */
+  overflow-y: auto; /* enable scrolling */
+  scrollbar-width: thin; /* Firefox: thin scrollbar */
+  scrollbar-color: transparent transparent; /* hidden by default */
+}
+
+/* Chrome, Safari, Edge (WebKit browsers) */
+.cardContainer::-webkit-scrollbar {
+  width: 8px; /* scrollbar width */
+}
+
+.cardContainer::-webkit-scrollbar-thumb {
+  background: transparent; /* hidden by default */
+  border-radius: 4px;
+}
+
+.cardContainer::-webkit-scrollbar-track {
+  background: transparent; /* track hidden too */
+}
+
+/* Show scrollbar only on hover */
+.cardContainer:hover {
+  scrollbar-color: rgba(0, 0, 0, 0.4) transparent; /* Firefox */
+}
+
+.cardContainer:hover::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.4); /* visible on hover */
+}
+
+.songList {
+  /* max-height: 400px;       or whatever height you want */
+  overflow-y: auto; /* enable scrolling */
+  scrollbar-width: thin; /* Firefox: thin scrollbar */
+  scrollbar-color: transparent transparent; /* hidden by default */
+}
+
+/* Chrome, Safari, Edge (WebKit browsers) */
+.songList::-webkit-scrollbar {
+  width: 8px; /* scrollbar width */
+}
+
+.songList::-webkit-scrollbar-thumb {
+  background: transparent; /* hidden by default */
+  border-radius: 4px;
+}
+
+.songList::-webkit-scrollbar-track {
+  background: transparent; /* track hidden too */
+}
+
+/* Show scrollbar only on hover */
+.songList:hover {
+  scrollbar-color: rgba(0, 0, 0, 0.4) transparent; /* Firefox */
+}
+
+.songList:hover::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.4); /* visible on hover */
+}
+
+@media (max-width: 1400px) {
+  .p-1 {
+    padding: 10px 10px !important;
+  }
+}
