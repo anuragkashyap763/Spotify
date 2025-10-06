@@ -18,7 +18,7 @@ let _fadeRaf = null;
 let lastUserVolume = 1;
 
 // Paths used in repo: /songs and svg/
-const BASE_SONGS_PATH = "/songs"; // relative path served by static hosting
+const BASE_SONGS_PATH = "/Spotify/songs"; // relative path served by static hosting
 const ICON_PATH = "svg"; // folder where svgs live
 
 const DEFAULT_IMAGE = ICON_PATH + "/music.svg";
@@ -451,7 +451,7 @@ async function main() {
       } catch (e) {
         continue;
       }
-      const marker = "/songs/";
+      const marker = "/Spotify/songs/";
       const path = decodeURIComponent(url.pathname || "");
       const idx = path.indexOf(marker);
       if (idx === -1) continue;
