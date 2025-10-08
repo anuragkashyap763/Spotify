@@ -117,7 +117,7 @@ function setInitialTimer() {
 // ---- directory scraping getSongs (works with directory index listing) ----
 async function getSongs(folder) {
   currentFolder = folder;
-  const listUrl = `${BASE_SONGS_PATH}/${encodeURIComponent(folder)}/`;
+  const listUrl = `${BASE_SONGS_PATH}/${encodeURIComponent(folder)}/index.json`;
   const a = await fetch(listUrl);
   const response = await a.text();
 
@@ -416,7 +416,7 @@ async function main() {
 
   // getFolders scrapes directory listing at BASE_SONGS_PATH root and returns folder names.
   async function getFolders() {
-    const res = await fetch(`${BASE_SONGS_PATH}/`);
+    const res = await fetch(`${BASE_SONGS_PATH}/index.json`);
     const html = await res.text();
     const tmp = document.createElement("div");
     tmp.innerHTML = html;
