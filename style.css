@@ -468,7 +468,7 @@ body {
     width: 90px;
   }
 }
-@media (max-width: 600px) {
+/* @media (max-width: 600px) {
   .volumeRocker,
   .volSeekbar {
     display: none !important;
@@ -484,7 +484,168 @@ body {
   .card img.card-cover {
     height: 100px;
   }
+
+  .playbar {
+    width: calc(100vw - 60px);
+    height: 100px;
+  }
+
+} */
+
+
+/* MOBILE: compact abovebar layout (replace existing .abovebar / songButtons / songTime rules) */
+@media (max-width: 600px) {
+  /* full-width abovebar row */
+
+  /* make left pane a fixed, full-height panel when opened (keeps behavior similar to your current layout) */
+  .left {
+    position: fixed;        /* fixed so it sits above the playbar regardless of page flow */
+    top: 0;
+    left: -120%;            /* default hidden */
+    height: 100vh;
+    width: 86vw;            /* slightly less than full width so right-edge playbar still visible if desired */
+    max-width: 420px;
+    overflow: auto;         /* allow internal scrolling */
+    -webkit-overflow-scrolling: touch;
+    transition: left 0.28s ease;
+    box-shadow: 0 6px 30px rgba(0,0,0,0.6);
+    padding-bottom: var(--playbar-h, 140px); /* reserve space for playbar at bottom */
+  }
+
+  /* when the left panel is visible, bring it above the playbar */
+  .left.open {
+    left: 0 !important;
+    z-index: 120; /* higher than .playbar z-index:50 so items are not hidden */
+  }
+
+  /* ensure songList inside left has bottom padding so its last items aren't hidden */
+  .left .songList {
+    padding-bottom: calc(var(--playbar-h, 140px) + 12px); /* extra breathing room */
+  }
+
+  /* small tweak: make sure the playbar still sits visually inside .right area */
+  .playbar {
+    z-index: 50; /* keep existing value but less than .left.open */
+  }
+
+  /* optional: make the close button visible & clickable on left.open */
+  .left .close {
+    z-index: 200;
+  }
+
+
+   .playbar {
+    width: calc(100vw - 24px);
+    left: 12px !important;
+    height: 84px;
+    padding: 8px 12px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    align-items: stretch;
+    border-radius: 10px;
+  }
+  .abovebar {
+    width: calc(100vw - 30px);
+    display: flex;
+    justify-content: space-between;
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+    padding: 0;
+  }
+
+  /* hide the entire songTime block on mobile */
+  .songTime {
+    display: none !important;
+    visibility: hidden !important;
+    height: 0 !important;
+    overflow: hidden !important;
+  }
+
+  /* songInfo stays to the left and takes available space */
+  .songInfo {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    flex: 1 1 auto;        /* allow it to grow and shrink */
+    max-width: calc(100% - 96px); /* leave room for buttons on right */
+    overflow: hidden;
+  }
+  .songInfo img {
+    width: 40px;
+    height: 40px;
+    border-radius: 6px;
+    object-fit: cover;
+    flex-shrink: 0;
+  }
+  .songInfo .song-meta {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .songInfo .title, .songInfo .artist {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* songButtons pinned to right; next + play only (previous hidden) */
+  .songButtons {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    flex: 0 0 auto;
+    /* small fixed width to allow large touch targets */
+    min-width: 96px;
+  }
+
+  /* hide the previous icon entirely on mobile */
+  .songButtons #previous {
+    display: none !important;
+  }
+
+  /* ensure next is left of play button (use order property because HTML order is prev, play, next) */
+  .songButtons #next {
+    order: 1;
+    width: 44px;
+    height: 44px;
+  }
+  .songButtons #playMedia {
+    order: 2;
+    width: 48px;
+    height: 48px;
+  }
+
+  /* smaller visual tweaks */
+  .songButtons img {
+    cursor: pointer;
+    object-fit: contain;
+  }
+
+  /* seekbar below the abovebar row; full width */
+  .seekbar {
+    position: relative;
+    bottom: 0;
+    height: 4px;
+    width: 100%;
+    margin-top: 6px;
+  }
+
+  /* keep marquee/slide behavior for long titles */
+  .songInfo .title .marquee-inner, .songInfo .artist .marquee-inner {
+    display: inline-block;
+  }
+
+  /* .songList {
+    padding-bottom: 40px;
+  } */
 }
+
+
 
 /* Extra */
 .card h2 {
