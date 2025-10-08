@@ -115,33 +115,106 @@ function setInitialTimer() {
 }
 
 // ---- directory scraping getSongs (works with directory index listing) ----
+// async function getSongs(folder) {
+//   currentFolder = folder;
+//   const listUrl = `${BASE_SONGS_PATH}/${encodeURIComponent(folder)}/index.json`;
+//   const a = await fetch(listUrl);
+//   const response = await a.text();
+
+//   const div = document.createElement("div");
+//   div.innerHTML = response;
+//   const as = div.getElementsByTagName("a");
+//   const out = [];
+//   for (let i = 0; i < as.length; i++) {
+//     const el = as[i];
+//     if (!el.href) continue;
+//     try {
+//       const url = new URL(el.href, window.location.href);
+//       const parts = url.pathname.split("/").filter(Boolean);
+//       const last = parts[parts.length - 1] || "";
+//       if (last.toLowerCase().endsWith(".mp3"))
+//         out.push(decodeURIComponent(last));
+//     } catch (err) {
+//       const seg = el.href.split("/").pop();
+//       if (seg && seg.toLowerCase().endsWith(".mp3"))
+//         out.push(decodeURIComponent(seg));
+//     }
+//   }
+//   return out;
+// }
+
+
+// global getSongs (replace your current one)
 async function getSongs(folder) {
   currentFolder = folder;
   const listUrl = `${BASE_SONGS_PATH}/${encodeURIComponent(folder)}/index.json`;
-  const a = await fetch(listUrl);
-  const response = await a.text();
 
-  const div = document.createElement("div");
-  div.innerHTML = response;
-  const as = div.getElementsByTagName("a");
-  const out = [];
-  for (let i = 0; i < as.length; i++) {
-    const el = as[i];
-    if (!el.href) continue;
-    try {
-      const url = new URL(el.href, window.location.href);
-      const parts = url.pathname.split("/").filter(Boolean);
-      const last = parts[parts.length - 1] || "";
-      if (last.toLowerCase().endsWith(".mp3"))
-        out.push(decodeURIComponent(last));
-    } catch (err) {
-      const seg = el.href.split("/").pop();
-      if (seg && seg.toLowerCase().endsWith(".mp3"))
-        out.push(decodeURIComponent(seg));
+  try {
+    const res = await fetch(listUrl, { cache: "no-store" });
+    if (!res.ok) {
+      console.warn("getSongs: fetch failed", listUrl, res.status);
+      // fall through to try text/html fallback below (if any)
+      const text = await res.text().catch(() => null);
+      if (!text) return [];
+      // attempt HTML scrape fallback
+      const div = document.createElement("div");
+      div.innerHTML = text;
+      const as = div.getElementsByTagName("a");
+      const out = [];
+      for (let i = 0; i < as.length; i++) {
+        const el = as[i];
+        if (!el.href) continue;
+        try {
+          const url = new URL(el.href, window.location.href);
+          const parts = url.pathname.split("/").filter(Boolean);
+          const last = parts[parts.length - 1] || "";
+          if (last.toLowerCase().endsWith(".mp3")) out.push(decodeURIComponent(last));
+        } catch (err) {
+          const seg = el.href.split("/").pop();
+          if (seg && seg.toLowerCase().endsWith(".mp3")) out.push(decodeURIComponent(seg));
+        }
+      }
+      return out;
     }
+
+    // OK — try JSON first
+    try {
+      const data = await res.json();
+      if (Array.isArray(data)) return data;
+      console.warn("getSongs: index.json exists but is not an array — falling back to text parse", listUrl);
+    } catch (jsonErr) {
+      // parse as text and attempt legacy HTML scrape
+      const text = await res.text().catch(() => null);
+      if (!text) return [];
+      const div = document.createElement("div");
+      div.innerHTML = text;
+      const as = div.getElementsByTagName("a");
+      const out = [];
+      for (let i = 0; i < as.length; i++) {
+        const el = as[i];
+        if (!el.href) continue;
+        try {
+          const url = new URL(el.href, window.location.href);
+          const parts = url.pathname.split("/").filter(Boolean);
+          const last = parts[parts.length - 1] || "";
+          if (last.toLowerCase().endsWith(".mp3")) out.push(decodeURIComponent(last));
+        } catch (err) {
+          const seg = el.href.split("/").pop();
+          if (seg && seg.toLowerCase().endsWith(".mp3")) out.push(decodeURIComponent(seg));
+        }
+      }
+      return out;
+    }
+  } catch (err) {
+    console.error("getSongs: network error for", listUrl, err);
+    return [];
   }
-  return out;
+
+  return [];
 }
+
+
+
 
 // ---- robust fadeVolume (works with rAF and falls back to setInterval on mobile) ----
 const fadeVolume = (to, duration = 2000, cb) => {
@@ -415,38 +488,120 @@ async function main() {
   updateVolumeIcon();
 
   // getFolders scrapes directory listing at BASE_SONGS_PATH root and returns folder names.
-  async function getFolders() {
-    const res = await fetch(`${BASE_SONGS_PATH}/index.json`);
-    const html = await res.text();
-    const tmp = document.createElement("div");
-    tmp.innerHTML = html;
-    const anchors = tmp.getElementsByTagName("a");
-    const foldersArr = [];
-    for (let i = 0; i < anchors.length; i++) {
-      const a = anchors[i];
-      if (!a.href) continue;
-      let url;
-      try {
-        url = new URL(a.getAttribute("href"), window.location.origin);
-      } catch (e) {
-        continue;
+  // async function getFolders() {
+  //   const res = await fetch(`${BASE_SONGS_PATH}/index.json`);
+  //   const html = await res.text();
+  //   const tmp = document.createElement("div");
+  //   tmp.innerHTML = html;
+  //   const anchors = tmp.getElementsByTagName("a");
+  //   const foldersArr = [];
+  //   for (let i = 0; i < anchors.length; i++) {
+  //     const a = anchors[i];
+  //     if (!a.href) continue;
+  //     let url;
+  //     try {
+  //       url = new URL(a.getAttribute("href"), window.location.origin);
+  //     } catch (e) {
+  //       continue;
+  //     }
+  //     // marker tuned to your path
+  //     const marker = "/songs/";
+  //     const path = decodeURIComponent(url.pathname || "");
+  //     const idx = path.indexOf(marker);
+  //     if (idx === -1) continue;
+  //     let after = path.slice(idx + marker.length);
+  //     after = after.replace(/^\/+|\/+$/g, "");
+  //     if (!after || after === "..") continue;
+  //     const firstSegment = after.split("/")[0];
+  //     if (!firstSegment) continue;
+  //     if (firstSegment.startsWith(".")) continue;
+  //     if (firstSegment.includes(".")) continue;
+  //     if (!foldersArr.includes(firstSegment)) foldersArr.push(firstSegment);
+  //   }
+  //   return foldersArr;
+  // }
+
+
+
+
+
+  // inside main()
+async function getFolders() {
+  const listUrl = `${BASE_SONGS_PATH}/index.json`;
+
+  try {
+    const res = await fetch(listUrl, { cache: "no-store" });
+    if (!res.ok) {
+      console.warn("getFolders: fetch failed", listUrl, res.status);
+      // try legacy HTML fallback
+      const text = await res.text().catch(() => null);
+      if (!text) return [];
+      const tmp = document.createElement("div");
+      tmp.innerHTML = text;
+      const anchors = tmp.getElementsByTagName("a");
+      const foldersArr = [];
+      for (let i = 0; i < anchors.length; i++) {
+        const a = anchors[i];
+        if (!a.href) continue;
+        let url;
+        try { url = new URL(a.getAttribute("href"), window.location.origin); } catch(e) { continue; }
+        const marker = "/songs/";
+        const path = decodeURIComponent(url.pathname || "");
+        const idx = path.indexOf(marker);
+        if (idx === -1) continue;
+        let after = path.slice(idx + marker.length).replace(/^\/+|\/+$/g, "");
+        if (!after || after === "..") continue;
+        const firstSegment = after.split("/")[0];
+        if (!firstSegment) continue;
+        if (firstSegment.startsWith(".")) continue;
+        if (firstSegment.includes(".")) continue;
+        if (!foldersArr.includes(firstSegment)) foldersArr.push(firstSegment);
       }
-      // marker tuned to your path
-      const marker = "/songs/";
-      const path = decodeURIComponent(url.pathname || "");
-      const idx = path.indexOf(marker);
-      if (idx === -1) continue;
-      let after = path.slice(idx + marker.length);
-      after = after.replace(/^\/+|\/+$/g, "");
-      if (!after || after === "..") continue;
-      const firstSegment = after.split("/")[0];
-      if (!firstSegment) continue;
-      if (firstSegment.startsWith(".")) continue;
-      if (firstSegment.includes(".")) continue;
-      if (!foldersArr.includes(firstSegment)) foldersArr.push(firstSegment);
+      return foldersArr;
     }
-    return foldersArr;
+
+    // try JSON parse first
+    try {
+      const data = await res.json();
+      if (Array.isArray(data)) return data;
+      console.warn("getFolders: index.json exists but is not an array, falling back to HTML parse", listUrl);
+    } catch (jsonErr) {
+      // fallback to text/html scraping
+      const text = await res.text().catch(() => null);
+      if (!text) return [];
+      const tmp = document.createElement("div");
+      tmp.innerHTML = text;
+      const anchors = tmp.getElementsByTagName("a");
+      const foldersArr = [];
+      for (let i = 0; i < anchors.length; i++) {
+        const a = anchors[i];
+        if (!a.href) continue;
+        let url;
+        try { url = new URL(a.getAttribute("href"), window.location.origin); } catch(e) { continue; }
+        const marker = "/songs/";
+        const path = decodeURIComponent(url.pathname || "");
+        const idx = path.indexOf(marker);
+        if (idx === -1) continue;
+        let after = path.slice(idx + marker.length).replace(/^\/+|\/+$/g, "");
+        if (!after || after === "..") continue;
+        const firstSegment = after.split("/")[0];
+        if (!firstSegment) continue;
+        if (firstSegment.startsWith(".")) continue;
+        if (firstSegment.includes(".")) continue;
+        if (!foldersArr.includes(firstSegment)) foldersArr.push(firstSegment);
+      }
+      return foldersArr;
+    }
+  } catch (err) {
+    console.error("getFolders: network error for", listUrl, err);
+    return [];
   }
+}
+
+  
+
+
+  
 
   // cached folder order used for playlist-next looping
   let foldersOrder = [];
