@@ -1,4 +1,6 @@
-// script.js - full replaceable file
+
+
+
 
 // small safe HTML escaper
 function escapeHtml(s) {
@@ -14,18 +16,25 @@ let currentSong = new Audio();
 let playButton, prevButton, nextButton;
 let songs = [];
 let currentFolder;
+let _fadeTimer = null;
 let _fadeRaf = null;
 
 // track last user-set volume so fade-in can restore to it reliably
 let lastUserVolume = 1;
 
-// Paths used in repo: /songs and /svg
-const BASE_SONGS_PATH = "/songs"; // relative path served by static hosting (Vercel root)
-const ICON_PATH = "/svg"; // folder where svgs live (absolute path)
+// Paths used in repo: /songs and svg/
+// Adjust BASE_SONGS_PATH when deploying (you said you want /Spotify/songs for localhost)
+const BASE_SONGS_PATH = `/songs`;
+const ICON_PATH = "svg"; // folder where svgs live
 
 const DEFAULT_IMAGE = ICON_PATH + "/music.svg";
 const IMAGE_EXT_CANDIDATES = [".jpeg", ".jpg", ".png"];
 
+// ensure audio preloads and is allowed on mobile (best-effort)
+currentSong.preload = "metadata";
+currentSong.crossOrigin = "anonymous";
+
+// build candidate image URLs for an mp3 filename inside a folder
 function buildImageCandidatesFor(mp3Filename, folder) {
   const base = mp3Filename.replace(/\.mp3$/i, "").replaceAll("%20", " ").trim();
   const encodedFolder = encodeURIComponent(folder);
@@ -34,6 +43,7 @@ function buildImageCandidatesFor(mp3Filename, folder) {
   );
 }
 
+// set img src with fallback candidates. If none available use finalFallback.
 function setImgSrcWithFallback(imgEl, srcCandidates = [], finalFallback = DEFAULT_IMAGE) {
   if (!imgEl) return;
   let i = 0;
@@ -60,15 +70,11 @@ function secondsToMinutesSeconds(seconds) {
   return `${formattedMinutes}:${formattedSeconds}`;
 }
 
-/*
-  enableMarquee(container)
-  - wraps content in .marquee-inner if needed
-  - measures after next paint frames to get accurate widths
-  - creates a Web Animations API alternating animation when overflowed
-*/
+/* marquee helper (keeps long text sliding) */
 function enableMarquee(container) {
   if (!container || !(container instanceof HTMLElement)) return;
 
+  // ensure we have an inner wrapper
   let inner = container.querySelector(".marquee-inner");
   if (!inner) {
     inner = document.createElement("span");
@@ -78,7 +84,7 @@ function enableMarquee(container) {
   }
 
   if (container._marqueeAnim) {
-    try { container._marqueeAnim.cancel(); } catch (e) {}
+    try { container._marqueeAnim.cancel(); } catch(e) {}
     container._marqueeAnim = null;
   }
   inner.style.transform = "translateX(0)";
@@ -87,27 +93,17 @@ function enableMarquee(container) {
     requestAnimationFrame(() => {
       const innerWidth = inner.scrollWidth;
       const containerWidth = container.clientWidth;
-
       if (innerWidth > containerWidth + 4) {
         const shift = -(innerWidth - containerWidth);
         const durationSec = Math.max(4, Math.min(20, Math.abs(shift) / 25));
         const duration = durationSec * 1000;
-
         const anim = inner.animate(
-          [
-            { transform: "translateX(0)" },
-            { transform: `translateX(${shift}px)` }
-          ],
-          {
-            duration,
-            iterations: Infinity,
-            direction: "alternate",
-            easing: "linear"
-          }
+          [{ transform: "translateX(0)" }, { transform: `translateX(${shift}px)` }],
+          { duration, iterations: Infinity, direction: "alternate", easing: "linear" }
         );
         container._marqueeAnim = anim;
       } else {
-        try { inner.style.transform = "translateX(0)"; } catch (e) {}
+        try { inner.style.transform = "translateX(0)"; } catch(e){}
       }
     });
   });
@@ -118,80 +114,105 @@ function setInitialTimer() {
   if (timerEl) timerEl.textContent = "00:00 | 00:00";
 }
 
-// ------------------- JSON-based fetching -------------------
-
-// fetch list of folder names from /songs/index.json
-async function getFolders() {
-  try {
-    const res = await fetch(`${BASE_SONGS_PATH}/index.json`, { cache: "no-store" });
-    if (!res.ok) {
-      console.warn("getFolders: index.json not found:", res.status);
-      return [];
-    }
-    const data = await res.json();
-    if (!Array.isArray(data)) {
-      console.warn("getFolders: index.json is not an array");
-      return [];
-    }
-    return data.map(String);
-  } catch (err) {
-    console.error("getFolders() error:", err);
-    return [];
-  }
-}
-
-// fetch song filenames for a folder from /songs/<folder>/index.json
+// ---- directory scraping getSongs (works with directory index listing) ----
 async function getSongs(folder) {
   currentFolder = folder;
-  try {
-    const url = `${BASE_SONGS_PATH}/${encodeURIComponent(folder)}/index.json`;
-    const res = await fetch(url, { cache: "no-store" });
-    if (!res.ok) {
-      console.warn("getSongs: index.json missing for", folder, "status:", res.status, "url:", url);
-      return [];
+  const listUrl = `${BASE_SONGS_PATH}/${encodeURIComponent(folder)}/`;
+  const a = await fetch(listUrl);
+  const response = await a.text();
+
+  const div = document.createElement("div");
+  div.innerHTML = response;
+  const as = div.getElementsByTagName("a");
+  const out = [];
+  for (let i = 0; i < as.length; i++) {
+    const el = as[i];
+    if (!el.href) continue;
+    try {
+      const url = new URL(el.href, window.location.href);
+      const parts = url.pathname.split("/").filter(Boolean);
+      const last = parts[parts.length - 1] || "";
+      if (last.toLowerCase().endsWith(".mp3"))
+        out.push(decodeURIComponent(last));
+    } catch (err) {
+      const seg = el.href.split("/").pop();
+      if (seg && seg.toLowerCase().endsWith(".mp3"))
+        out.push(decodeURIComponent(seg));
     }
-    const data = await res.json();
-    if (!Array.isArray(data)) return [];
-    return data.map(String);
-  } catch (err) {
-    console.error("getSongs() error:", err);
-    return [];
   }
+  return out;
 }
 
-// ------------------- Volume fade helper -------------------
+// ---- robust fadeVolume (works with rAF and falls back to setInterval on mobile) ----
 const fadeVolume = (to, duration = 2000, cb) => {
+  // clear previous
   if (_fadeRaf) {
     cancelAnimationFrame(_fadeRaf);
     _fadeRaf = null;
   }
+  if (_fadeTimer) {
+    clearInterval(_fadeTimer);
+    _fadeTimer = null;
+  }
+
   const start = performance.now();
-  const from = isFinite(currentSong.volume) ? currentSong.volume : lastUserVolume || 1;
+  const from = isFinite(currentSong.volume) ? currentSong.volume : (lastUserVolume || 1);
   const delta = to - from;
+
   if (duration <= 0) {
     currentSong.volume = Math.max(0, Math.min(1, to));
     if (cb) cb();
     return;
   }
-  const step = (now) => {
+
+  // try RAF-based smooth fade (preferred)
+  let usingRAF = true;
+  const stepRAF = (now) => {
     const t = Math.min(1, (now - start) / duration);
     const v = from + delta * t;
     currentSong.volume = Math.max(0, Math.min(1, v));
     if (t < 1) {
-      _fadeRaf = requestAnimationFrame(step);
+      _fadeRaf = requestAnimationFrame(stepRAF);
     } else {
       _fadeRaf = null;
       if (cb) cb();
     }
   };
-  _fadeRaf = requestAnimationFrame(step);
+
+  // Start RAF; if RAF never runs within a short period (e.g. background tab / some mobile), fallback to interval
+  _fadeRaf = requestAnimationFrame(stepRAF);
+
+  // fallback timer after 220ms if RAF didn't progress (mobile browsers sometimes throttle RAF)
+  const fallbackTimeout = setTimeout(() => {
+    if (_fadeRaf) {
+      // assume RAF is OK — let it continue
+      clearTimeout(fallbackTimeout);
+      return;
+    }
+    // else fallback to interval
+    usingRAF = false;
+    if (_fadeRaf) { cancelAnimationFrame(_fadeRaf); _fadeRaf = null; }
+    const start2 = performance.now();
+    const stepMs = 50;
+    _fadeTimer = setInterval(() => {
+      const now2 = performance.now();
+      const t2 = Math.min(1, (now2 - start2) / duration);
+      const v2 = from + delta * t2;
+      currentSong.volume = Math.max(0, Math.min(1, v2));
+      if (t2 >= 1) {
+        clearInterval(_fadeTimer);
+        _fadeTimer = null;
+        if (cb) cb();
+      }
+    }, stepMs);
+  }, 220);
 };
 
 // helpers for UI highlight management
 function clearSongHighlights() {
   document.querySelectorAll(".songList ul li.playing").forEach(li => li.classList.remove("playing"));
   document.querySelectorAll(".songList ul li .padPlayBtn").forEach(btn => {
-    if (btn.tagName && btn.tagName.toLowerCase() === "img") btn.src = `${ICON_PATH}/play.svg`;
+    if (btn && btn.tagName && btn.tagName.toLowerCase() === "img") btn.src = `${ICON_PATH}/play.svg`;
   });
 }
 function clearCardHighlights() {
@@ -225,14 +246,12 @@ const playMusic = (track, pause = false, fadeMs = 1000) => {
   // choose desired volume: prefer lastUserVolume if currentSong.volume is 0 or not finite
   const desiredVolume = (typeof currentSong.volume === "number" && currentSong.volume > 0) ? currentSong.volume : (lastUserVolume || 1);
 
-  // fade out current audio, change src, fade in
   fadeVolume(0, fadeMs, () => {
     try { currentSong.pause(); } catch (e) {}
     currentSong.src = url;
-    // ensure starting from 0 while we prepare
     currentSong.volume = 0;
 
-    // update playbar info
+    // update playbar info (image + title/artist)
     const infoEl = document.querySelector(".songInfo");
     if (infoEl) {
       const base = track.replace(/\.mp3$/i, "").replaceAll("%20", " ").trim();
@@ -244,7 +263,7 @@ const playMusic = (track, pause = false, fadeMs = 1000) => {
         title = parts.slice(1).join(" - ").trim();
       }
 
-      // preserve or create image left, then meta stacked right
+      // recreate info area keeping the <img> if exists
       let imgEl = infoEl.querySelector("img");
       if (imgEl) {
         imgEl = imgEl.cloneNode(false);
@@ -271,14 +290,12 @@ const playMusic = (track, pause = false, fadeMs = 1000) => {
       meta.appendChild(artistDiv);
       infoEl.appendChild(meta);
 
-      // enable marquee on artist line (works after paint because enableMarquee uses RAF)
       enableMarquee(artistDiv);
+      enableMarquee(titleDiv);
 
-      // set image src candidates (use track file name)
       const candidates = buildImageCandidatesFor(track, currentFolder);
       setImgSrcWithFallback(imgEl, candidates, DEFAULT_IMAGE);
 
-      // inline style vestiges (kept small)
       imgEl.style.width = "35px";
       imgEl.style.height = "35px";
       imgEl.style.objectFit = "cover";
@@ -289,7 +306,6 @@ const playMusic = (track, pause = false, fadeMs = 1000) => {
       meta.style.minWidth = "0";
     }
 
-    // reset seek/time UI
     const timerEl = document.querySelector(".songTime .timer");
     if (timerEl) timerEl.textContent = "00:00 | 00:00";
     const seekFillEl = document.querySelector(".seekbar .seekFill");
@@ -297,13 +313,14 @@ const playMusic = (track, pause = false, fadeMs = 1000) => {
     if (seekFillEl) seekFillEl.style.width = "0%";
     if (circleEl) circleEl.style.left = "0%";
 
-    // sync UI highlights: clear all, highlight current li & card
     clearSongHighlights();
     clearCardHighlights();
     highlightCardForFolder(currentFolder);
 
-    // update card play icons (reset then set active)
-    document.querySelectorAll(".card .play img").forEach(img => { if (img) img.src = `${ICON_PATH}/play.svg`; });
+    // reset card play icons
+    document.querySelectorAll(".card .play img").forEach((img) => {
+      if (img) img.src = `${ICON_PATH}/play.svg`;
+    });
     const activeCard = document.querySelector(`.card[data-folder="${CSS.escape(currentFolder)}"]`);
     if (activeCard) {
       activeCard.classList.add("playing-card");
@@ -328,64 +345,44 @@ const playMusic = (track, pause = false, fadeMs = 1000) => {
       if (playButton) playButton.src = `${ICON_PATH}/play.svg`;
     }
 
-    // fade back to desired volume (use lastUserVolume)
     fadeVolume(desiredVolume, fadeMs, () => {
-      // ensure lastUserVolume stays in sync after fade completes
       lastUserVolume = Math.max(0, Math.min(1, desiredVolume));
     });
   });
 };
 
-// --- NEW: reserve space under content so fixed playbar doesn't cover cards ---
+// reserve space under content so fixed playbar doesn't cover cards
 function reserveForPlaybar() {
   const pb = document.querySelector(".playbar");
   if (!pb) return;
-  // Add some breathing room (offsetHeight + margins)
   const h = pb.offsetHeight + 24;
   document.documentElement.style.setProperty("--playbar-h", h + "px");
 }
 
 // Ensure playbar stays inside the `.right` container horizontally.
-// Call this on load and resize.
 function positionPlaybar() {
   const pb = document.querySelector(".playbar");
   const rightPane = document.querySelector(".right");
   if (!pb || !rightPane) return;
 
-  // compute bounding rects
   const rightRect = rightPane.getBoundingClientRect();
-  const pbWidth = Math.min(pb.offsetWidth || 0, window.innerWidth - 40); // don't exceed viewport minus margin
+  const pbWidth = Math.min(pb.offsetWidth || 0, window.innerWidth - 40);
 
-  // desired left value so playbar is centered inside .right
   let left = Math.round(rightRect.left + Math.max(0, (rightRect.width - pbWidth) / 2));
-
-  // clamp so playbar is not off-screen on small widths
-  const minLeft = 8; // small left margin to viewport
+  const minLeft = 8;
   const maxLeft = Math.max(8, window.innerWidth - pbWidth - 8);
   if (left < minLeft) left = minLeft;
   if (left > maxLeft) left = maxLeft;
 
-  // apply
   pb.style.left = left + "px";
-  // ensure no translate is applied (we removed transform-based centering in CSS)
   pb.style.transform = "none";
 }
 
 async function main() {
-
-  // make sure we reserve the space once the DOM paints
   reserveForPlaybar();
   window.addEventListener("resize", reserveForPlaybar);
-  // When app starts and when window size changes, reposition playbar and reserve spacing
   positionPlaybar();
-  window.addEventListener("resize", () => {
-    positionPlaybar();
-    reserveForPlaybar && reserveForPlaybar();
-  });
-
-  // load songs from Trending initially (folder name "Trending" expected)
-  songs = await getSongs("Trending");
-  console.log("songs:", songs);
+  window.addEventListener("resize", () => { positionPlaybar(); reserveForPlaybar && reserveForPlaybar(); });
 
   // DOM refs
   playButton = document.getElementById("playMedia");
@@ -407,77 +404,86 @@ async function main() {
   if (volCircle) volCircle.style.left = "100%";
   setInitialTimer();
 
-  // volume icon helper (keeps lastUserVolume in sync on changes)
   const updateVolumeIcon = () => {
     if (!volumeIcon) return;
     const v = typeof currentSong.volume === "number" ? currentSong.volume : lastUserVolume;
     if (v <= 0) volumeIcon.src = `${ICON_PATH}/mute.svg`;
     else if (v < 0.6) volumeIcon.src = `${ICON_PATH}/volume.svg`;
     else volumeIcon.src = `${ICON_PATH}/volumeMax.svg`;
-    // preserve user's volume
     if (typeof v === "number" && v > 0) lastUserVolume = v;
   };
   updateVolumeIcon();
 
-  // fetch folders and render cards
-  async function getFoldersForUI() {
-    return await getFolders();
+  // getFolders scrapes directory listing at BASE_SONGS_PATH root and returns folder names.
+  async function getFolders() {
+    const res = await fetch(`${BASE_SONGS_PATH}/`);
+    const html = await res.text();
+    const tmp = document.createElement("div");
+    tmp.innerHTML = html;
+    const anchors = tmp.getElementsByTagName("a");
+    const foldersArr = [];
+    for (let i = 0; i < anchors.length; i++) {
+      const a = anchors[i];
+      if (!a.href) continue;
+      let url;
+      try {
+        url = new URL(a.getAttribute("href"), window.location.origin);
+      } catch (e) {
+        continue;
+      }
+      // marker tuned to your path
+      const marker = "/songs/";
+      const path = decodeURIComponent(url.pathname || "");
+      const idx = path.indexOf(marker);
+      if (idx === -1) continue;
+      let after = path.slice(idx + marker.length);
+      after = after.replace(/^\/+|\/+$/g, "");
+      if (!after || after === "..") continue;
+      const firstSegment = after.split("/")[0];
+      if (!firstSegment) continue;
+      if (firstSegment.startsWith(".")) continue;
+      if (firstSegment.includes(".")) continue;
+      if (!foldersArr.includes(firstSegment)) foldersArr.push(firstSegment);
+    }
+    return foldersArr;
   }
 
-  // render playlist cards
-  /*const cardContainer = document.querySelector(".cardContainer");
-  if (cardContainer) {
-    (async () => {
-      const folders = await getFoldersForUI();
-      cardContainer.innerHTML = "";
-      for (const folder of folders) {
-        const d = document.createElement("div");
-        d.className = "card";
-        d.dataset.folder = folder;
+  // cached folder order used for playlist-next looping
+  let foldersOrder = [];
+  try { foldersOrder = await getFolders(); } catch (e) { foldersOrder = []; }
 
-        const defaultTitle = folder;
-        const defaultDesc = "No description available.";
-        const defaultCover = "https://i.scdn.co/image/ab67616d00001e02fb17ca2db5032550091a6f9a";
-        const encodedFolder = encodeURIComponent(folder);
-        const folderBase = `${BASE_SONGS_PATH}/${encodedFolder}/`;
+  // initial load of Trending songs if available
+  try { songs = await getSongs("Trending"); } catch (e) { songs = []; }
+  console.log("initial songs:", songs);
 
-        d.innerHTML = `
-          <div class="play">
-            <img src="${ICON_PATH}/play.svg" alt="Play Button" />
-          </div>
-          <img class="card-cover" src="${defaultCover}" alt="Card Img" />
-          <h2 class="card-title">${escapeHtml(defaultTitle)}</h2>
-          <p class="card-desc">${escapeHtml(defaultDesc)}</p>
-        `;
-        cardContainer.appendChild(d);
-
-        (async () => {
-          try {
-            const infoRes = await fetch(folderBase + "info.json", { cache: "no-store" });
-            let info = {};
-            if (infoRes.ok) info = await infoRes.json();
-            const title = info.title && String(info.title).trim() ? info.title : defaultTitle;
-            const desc = info.description && String(info.description).trim() ? info.description : defaultDesc;
-            const coverUrl = folderBase + "cover.jpeg";
-            const imgEl = d.querySelector(".card-cover");
-            const h2El = d.querySelector(".card-title");
-            const pEl = d.querySelector(".card-desc");
-            if (imgEl) {
-              try {
-                const head = await fetch(coverUrl, { method: "HEAD" });
-                if (head.ok) imgEl.src = coverUrl;
-                else imgEl.src = defaultCover;
-              } catch (err) { imgEl.src = defaultCover; }
-            }
-            if (h2El) h2El.textContent = title;
-            if (pEl) pEl.textContent = desc;
-          } catch (err) {}
-        })();
-
-        // clicking the card loads that folder into left list and plays first track
-        d.addEventListener("click", async () => {
-          const songsFromFolder = await getSongs(folder);
-          songs = songsFromFolder;
+  // when a song ends -> advance to next song, next playlist, loop.
+  currentSong.addEventListener("ended", async () => {
+    try {
+      const currentFileEncoded = currentSong.src.split("/").slice(-1)[0] || "";
+      const currentFile = decodeURIComponent(currentFileEncoded);
+      let index = songs.indexOf(currentFile);
+      if (index === -1) {
+        if (songs.length > 0) { playMusic(songs[0]); return; }
+      }
+      // next in same playlist
+      if (index + 1 < songs.length) {
+        playMusic(songs[index + 1]);
+        return;
+      }
+      // else advance playlist cyclically
+      if (!foldersOrder || foldersOrder.length === 0) {
+        try { foldersOrder = await getFolders(); } catch (e) { foldersOrder = []; }
+      }
+      let folderIndex = foldersOrder.indexOf(currentFolder);
+      if (folderIndex === -1) folderIndex = 0;
+      const nextFolderIndex = (folderIndex + 1) % Math.max(1, foldersOrder.length);
+      const nextFolder = foldersOrder.length ? foldersOrder[nextFolderIndex] : null;
+      if (nextFolder) {
+        const songsFromNext = await getSongs(nextFolder);
+        songs = songsFromNext || [];
+        if (songs && songs.length) {
+          currentFolder = nextFolder;
+          // update left song list UI
           if (songUL) {
             songUL.innerHTML = "";
             for (const s of songs) {
@@ -492,11 +498,12 @@ async function main() {
               li.dataset.file = filename;
 
               const imgEl = document.createElement("img");
-              imgEl.alt = "Music image"; imgEl.className = "thumb";
+              imgEl.alt = "Music image";
+              imgEl.className = "thumb";
               imgEl.width = 50; imgEl.height = 50;
               imgEl.style.width = "50px"; imgEl.style.height = "50px";
               imgEl.style.borderRadius = "6px"; imgEl.style.objectFit = "cover"; imgEl.style.flexShrink = "0";
-              const candidates = buildImageCandidatesFor(filename, folder);
+              const candidates = buildImageCandidatesFor(filename, currentFolder);
               setImgSrcWithFallback(imgEl, candidates, DEFAULT_IMAGE);
 
               const infoDiv = document.createElement("div"); infoDiv.className = "info";
@@ -516,370 +523,82 @@ async function main() {
                 ev.stopPropagation();
                 const file = li.dataset.file;
                 if (!file) return;
-                currentFolder = folder;
-                playMusic(file);
+                const currentFileEncoded2 = currentSong.src.split("/").slice(-1)[0] || "";
+                const currentFile2 = decodeURIComponent(currentFileEncoded2);
+                if (currentFile2 === file) {
+                  if (currentSong.paused) currentSong.play().catch(()=>{});
+                  else currentSong.pause();
+                } else {
+                  currentFolder = currentFolder;
+                  playMusic(file);
+                }
               });
+
+              const padImgEl = li.querySelector(".padPlayBtn");
+              if (padImgEl) {
+                padImgEl.addEventListener("click", (ev) => {
+                  ev.stopPropagation();
+                  const file = li.dataset.file;
+                  if (!file) return;
+                  const currentFileEncoded2 = currentSong.src.split("/").slice(-1)[0] || "";
+                  const currentFile2 = decodeURIComponent(currentFileEncoded2);
+                  if (currentFile2 === file) {
+                    if (currentSong.paused) currentSong.play().catch(()=>{});
+                    else currentSong.pause();
+                  } else {
+                    currentFolder = currentFolder;
+                    playMusic(file);
+                  }
+                });
+                padImgEl.style.transition = "transform 160ms ease";
+                padImgEl.addEventListener("mouseenter", () => (padImgEl.style.transform = "scale(1.12)"));
+                padImgEl.addEventListener("mouseleave", () => (padImgEl.style.transform = "scale(1)"));
+              }
 
               songUL.appendChild(li);
             }
           }
-          currentFolder = folder;
-          if (songs && songs.length) playMusic(songs[0]);
-        });
-
-        // small play icon inside card: populate left playlist AND play first track
-        const playImg = d.querySelector(".play img");
-        if (playImg) {
-          playImg.addEventListener("click", async (ev) => {
-            ev.stopPropagation();
-            const songsFromFolder = await getSongs(folder);
-            songs = songsFromFolder;
-            currentFolder = folder;
-
-            if (songUL) {
-              songUL.innerHTML = "";
-              for (const s of songs) {
-                const filename = s;
-                const base = filename.replaceAll("%20", " ").replace(/\.mp3$/i, "").trim();
-                let artist = "Unknown";
-                let title = base;
-                const parts = base.split(" - ");
-                if (parts.length >= 2) { artist = parts[0].trim(); title = parts.slice(1).join(" - ").trim(); }
-
-                const li = document.createElement("li");
-                li.dataset.file = filename;
-
-                const imgEl = document.createElement("img");
-                imgEl.alt = "Music image"; imgEl.className = "thumb";
-                imgEl.width = 50; imgEl.height = 50;
-                imgEl.style.width = "50px"; imgEl.style.height = "50px";
-                imgEl.style.borderRadius = "6px"; imgEl.style.objectFit = "cover"; imgEl.style.flexShrink = "0";
-                const candidates = buildImageCandidatesFor(filename, folder);
-                setImgSrcWithFallback(imgEl, candidates, DEFAULT_IMAGE);
-
-                const infoDiv = document.createElement("div"); infoDiv.className = "info";
-                const titleDiv = document.createElement("div"); titleDiv.textContent = title; titleDiv.style.fontWeight = "700";
-                const artistDiv = document.createElement("div"); artistDiv.textContent = artist;
-                artistDiv.style.fontSize = "12px"; artistDiv.style.color = "#cfcfcf";
-                artistDiv.style.whiteSpace = "nowrap"; artistDiv.style.overflow = "hidden"; artistDiv.style.textOverflow = "ellipsis";
-                infoDiv.appendChild(titleDiv); infoDiv.appendChild(artistDiv);
-
-                const playNow = document.createElement("div"); playNow.className = "playnow";
-                playNow.innerHTML = `<img class="padPlayBtn" src="${ICON_PATH}/play.svg" alt="Play Now">`;
-
-                li.appendChild(imgEl); li.appendChild(infoDiv); li.appendChild(playNow);
-                enableMarquee(artistDiv);
-
-                li.addEventListener("click", (ev2) => {
-                  ev2.stopPropagation();
-                  const file = li.dataset.file;
-                  if (!file) return;
-                  currentFolder = folder;
-                  playMusic(file);
-                });
-
-                const padImg = li.querySelector(".padPlayBtn");
-                if (padImg) {
-                  padImg.addEventListener("click", (ev3) => {
-                    ev3.stopPropagation();
-                    const file = li.dataset.file;
-                    if (!file) return;
-                    currentFolder = folder;
-                    playMusic(file);
-                  });
-                  padImg.style.transition = "transform 160ms ease";
-                  padImg.addEventListener("mouseenter", () => (padImg.style.transform = "scale(1.12)"));
-                  padImg.addEventListener("mouseleave", () => (padImg.style.transform = "scale(1)"));
-                }
-
-                songUL.appendChild(li);
-              }
-            }
-
-            if (songs && songs.length) {
-              playMusic(songs[0]);
-            }
-          });
+          playMusic(songs[0]);
         }
+      } else {
+        // fallback — restart current
+        if (songs && songs.length) playMusic(songs[0]);
       }
-    })();
-  }*/
-
-
-  // render playlist cards
-//   const cardContainer = document.querySelector(".cardContainer");
-// if (cardContainer) {
-//   (async () => {
-//     // remove any static/default cards immediately so nothing flashes
-//     cardContainer.innerHTML = "";
-
-//     // optional: show a tiny spinner while fetching (remove if you don't want it)
-//     const spinner = document.createElement("div");
-//     spinner.className = "cards-spinner";
-//     spinner.textContent = "Loading playlists...";
-//     // keep spinner visually minimal; you can style .cards-spinner in CSS
-//     cardContainer.appendChild(spinner);
-
-//     let folders = [];
-//     try {
-//       folders = await getFoldersForUI();
-//     } catch (err) {
-//       console.error("Failed to fetch folders for UI:", err);
-//       // show friendly empty state
-//       cardContainer.innerHTML = '<div class="no-folders">Playlists unavailable</div>';
-//       return;
-//     }
-
-//     // remove spinner before rendering cards
-//     if (spinner && spinner.parentNode) spinner.parentNode.removeChild(spinner);
-
-//     // nothing to show
-//     if (!folders || folders.length === 0) {
-//       cardContainer.innerHTML = '<div class="no-folders">No playlists found</div>';
-//       return;
-//     }
-
-//     // build cards in a document fragment (off-DOM) for zero-flash rendering
-//     const frag = document.createDocumentFragment();
-
-//     for (const folder of folders) {
-//       const d = document.createElement("div");
-//       d.className = "card";
-//       d.dataset.folder = folder;
-
-//       const defaultTitle = folder;
-//       const defaultDesc = "No description available.";
-//       const defaultCover =
-//         "https://i.scdn.co/image/ab67616d00001e02fb17ca2db5032550091a6f9a";
-//       const encodedFolder = encodeURIComponent(folder);
-//       const folderBase = `${BASE_SONGS_PATH}/${encodedFolder}/`;
-
-//       // start with minimal markup (we'll update with real info below)
-//       d.innerHTML = `
-//         <div class="play">
-//           <img src="${ICON_PATH}/play.svg" alt="Play Button" />
-//         </div>
-//         <img class="card-cover" src="${defaultCover}" alt="Card Img" />
-//         <h2 class="card-title">${escapeHtml(defaultTitle)}</h2>
-//         <p class="card-desc">${escapeHtml(defaultDesc)}</p>
-//       `;
-
-//       // populate per-card info.json and cover asynchronously, but leave UI consistent
-//       (async () => {
-//         try {
-//           const infoRes = await fetch(folderBase + "info.json", { cache: "no-store" });
-//           let info = {};
-//           if (infoRes && infoRes.ok) info = await infoRes.json();
-
-//           const title = info.title && String(info.title).trim() ? info.title : defaultTitle;
-//           const desc = info.description && String(info.description).trim() ? info.description : defaultDesc;
-//           const coverUrl = folderBase + "cover.jpeg";
-
-//           const imgEl = d.querySelector(".card-cover");
-//           const h2El = d.querySelector(".card-title");
-//           const pEl = d.querySelector(".card-desc");
-
-//           if (imgEl) {
-//             try {
-//               // prefer HEAD check so we don't replace with 404 image
-//               const head = await fetch(coverUrl, { method: "HEAD" });
-//               if (head && head.ok) imgEl.src = coverUrl;
-//               else imgEl.src = defaultCover;
-//             } catch (err) {
-//               imgEl.src = defaultCover;
-//             }
-//           }
-//           if (h2El) h2El.textContent = title;
-//           if (pEl) pEl.textContent = desc;
-//         } catch (err) {
-//           // keep defaults if info.json/cover fail
-//           // console.debug(err);
-//         }
-//       })();
-
-//       // attach click handlers (same behavior as before)
-//       d.addEventListener("click", async () => {
-//         const songsFromFolder = await getSongs(folder);
-//         songs = songsFromFolder;
-//         if (songUL) {
-//           songUL.innerHTML = "";
-//           for (const s of songs) {
-//             const filename = s;
-//             const base = filename.replaceAll("%20", " ").replace(/\.mp3$/i, "").trim();
-//             let artist = "Unknown";
-//             let title = base;
-//             const parts = base.split(" - ");
-//             if (parts.length >= 2) { artist = parts[0].trim(); title = parts.slice(1).join(" - ").trim(); }
-
-//             const li = document.createElement("li");
-//             li.dataset.file = filename;
-
-//             const imgEl = document.createElement("img");
-//             imgEl.alt = "Music image"; imgEl.className = "thumb";
-//             imgEl.width = 50; imgEl.height = 50;
-//             imgEl.style.width = "50px"; imgEl.style.height = "50px";
-//             imgEl.style.borderRadius = "6px"; imgEl.style.objectFit = "cover"; imgEl.style.flexShrink = "0";
-//             const candidates = buildImageCandidatesFor(filename, folder);
-//             setImgSrcWithFallback(imgEl, candidates, DEFAULT_IMAGE);
-
-//             const infoDiv = document.createElement("div"); infoDiv.className = "info";
-//             const titleDiv = document.createElement("div"); titleDiv.textContent = title; titleDiv.style.fontWeight = "700";
-//             const artistDiv = document.createElement("div"); artistDiv.textContent = artist;
-//             artistDiv.style.fontSize = "12px"; artistDiv.style.color = "#cfcfcf";
-//             artistDiv.style.whiteSpace = "nowrap"; artistDiv.style.overflow = "hidden"; artistDiv.style.textOverflow = "ellipsis";
-//             infoDiv.appendChild(titleDiv); infoDiv.appendChild(artistDiv);
-
-//             const playNow = document.createElement("div"); playNow.className = "playnow";
-//             playNow.innerHTML = `<img class="padPlayBtn" src="${ICON_PATH}/play.svg" alt="Play Now">`;
-
-//             li.appendChild(imgEl); li.appendChild(infoDiv); li.appendChild(playNow);
-//             enableMarquee(artistDiv);
-
-//             li.addEventListener("click", (ev) => {
-//               ev.stopPropagation();
-//               const file = li.dataset.file;
-//               if (!file) return;
-//               currentFolder = folder;
-//               playMusic(file);
-//             });
-
-//             songUL.appendChild(li);
-//           }
-//         }
-//         currentFolder = folder;
-//         if (songs && songs.length) playMusic(songs[0]);
-//       });
-
-//       // small play icon inside card: populate left playlist AND play first track
-//       const playImg = d.querySelector(".play img");
-//       if (playImg) {
-//         playImg.addEventListener("click", async (ev) => {
-//           ev.stopPropagation();
-
-//           const songsFromFolder = await getSongs(folder);
-//           songs = songsFromFolder;
-//           currentFolder = folder;
-
-//           if (songUL) {
-//             songUL.innerHTML = "";
-//             for (const s of songs) {
-//               const filename = s;
-//               const base = filename.replaceAll("%20", " ").replace(/\.mp3$/i, "").trim();
-//               let artist = "Unknown";
-//               let title = base;
-//               const parts = base.split(" - ");
-//               if (parts.length >= 2) { artist = parts[0].trim(); title = parts.slice(1).join(" - ").trim(); }
-
-//               const li = document.createElement("li");
-//               li.dataset.file = filename;
-
-//               const imgEl = document.createElement("img");
-//               imgEl.alt = "Music image"; imgEl.className = "thumb";
-//               imgEl.width = 50; imgEl.height = 50;
-//               imgEl.style.width = "50px"; imgEl.style.height = "50px";
-//               imgEl.style.borderRadius = "6px"; imgEl.style.objectFit = "cover"; imgEl.style.flexShrink = "0";
-//               const candidates = buildImageCandidatesFor(filename, folder);
-//               setImgSrcWithFallback(imgEl, candidates, DEFAULT_IMAGE);
-
-//               const infoDiv = document.createElement("div"); infoDiv.className = "info";
-//               const titleDiv = document.createElement("div"); titleDiv.textContent = title; titleDiv.style.fontWeight = "700";
-//               const artistDiv = document.createElement("div"); artistDiv.textContent = artist;
-//               artistDiv.style.fontSize = "12px"; artistDiv.style.color = "#cfcfcf";
-//               artistDiv.style.whiteSpace = "nowrap"; artistDiv.style.overflow = "hidden"; artistDiv.style.textOverflow = "ellipsis";
-//               infoDiv.appendChild(titleDiv); infoDiv.appendChild(artistDiv);
-
-//               const playNow = document.createElement("div"); playNow.className = "playnow";
-//               playNow.innerHTML = `<img class="padPlayBtn" src="${ICON_PATH}/play.svg" alt="Play Now">`;
-
-//               li.appendChild(imgEl); li.appendChild(infoDiv); li.appendChild(playNow);
-//               enableMarquee(artistDiv);
-
-//               li.addEventListener("click", (ev2) => {
-//                 ev2.stopPropagation();
-//                 const file = li.dataset.file;
-//                 if (!file) return;
-//                 currentFolder = folder;
-//                 playMusic(file);
-//               });
-
-//               const padImg = li.querySelector(".padPlayBtn");
-//               if (padImg) {
-//                 padImg.addEventListener("click", (ev3) => {
-//                   ev3.stopPropagation();
-//                   const file = li.dataset.file;
-//                   if (!file) return;
-//                   currentFolder = folder;
-//                   playMusic(file);
-//                 });
-//                 padImg.style.transition = "transform 160ms ease";
-//                 padImg.addEventListener("mouseenter", () => (padImg.style.transform = "scale(1.12)"));
-//                 padImg.addEventListener("mouseleave", () => (padImg.style.transform = "scale(1)"));
-//               }
-
-//               songUL.appendChild(li);
-//             }
-//           }
-
-//           if (songs && songs.length) playMusic(songs[0]);
-//         });
-//       }
-
-//       frag.appendChild(d);
-//     } // end for folders
-
-//     // append all cards at once
-//     cardContainer.appendChild(frag);
-//   })();
-// }
-
-
-
-
-
-
-
-
-
-
-
-
-
-// render playlist cards (no default flash — build cards only after fetching data)
-const cardContainer = document.querySelector(".cardContainer");
-if (cardContainer) {
-  (async () => {
-    // clear any static content immediately
-    cardContainer.innerHTML = "";
-
-    // spinner while we fetch metadata
-    const spinner = document.createElement("div");
-    spinner.className = "cards-spinner";
-    spinner.textContent = "Loading playlists...";
-    cardContainer.appendChild(spinner);
-
-    let folders = [];
-    try {
-      folders = await getFoldersForUI();
     } catch (err) {
-      console.error("Failed to fetch folders for UI:", err);
-      cardContainer.innerHTML = '<div class="no-folders">Playlists unavailable</div>';
-      return;
+      console.error("ended handler error:", err);
     }
+  });
 
-    // remove spinner if folders empty
-    if (!folders || folders.length === 0) {
-      if (spinner && spinner.parentNode) spinner.parentNode.removeChild(spinner);
-      cardContainer.innerHTML = '<div class="no-folders">No playlists found</div>';
-      return;
-    }
+  // render playlist cards (no default flash — build after metadata fetch)
+  const cardContainer = document.querySelector(".cardContainer");
+  if (cardContainer) {
+    (async () => {
+      cardContainer.innerHTML = "";
+      const spinner = document.createElement("div");
+      spinner.className = "cards-spinner";
+      spinner.textContent = "Loading playlists...";
+      cardContainer.appendChild(spinner);
 
-    // fetch folder metadata + cover HEAD checks in parallel
-    const DEFAULT_COVER = "https://i.scdn.co/image/ab67616d00001e02fb17ca2db5032550091a6f9a";
-    const folderInfos = await Promise.all(
-      folders.map(async (folder) => {
+      let folders = [];
+      try {
+        folders = await getFolders();
+        if (Array.isArray(folders) && folders.length) foldersOrder = folders;
+      } catch (err) {
+        console.error("Failed to fetch folders for UI:", err);
+        cardContainer.innerHTML = '<div class="no-folders">Playlists unavailable</div>';
+        return;
+      }
+
+      if (!folders || folders.length === 0) {
+        if (spinner && spinner.parentNode) spinner.parentNode.removeChild(spinner);
+        cardContainer.innerHTML = '<div class="no-folders">No playlists found</div>';
+        return;
+      }
+
+      const DEFAULT_COVER = "https://i.scdn.co/image/ab67616d00001e02fb17ca2db5032550091a6f9a";
+      const folderInfos = await Promise.all(folders.map(async (folder) => {
         const encodedFolder = encodeURIComponent(folder);
         const folderBase = `${BASE_SONGS_PATH}/${encodedFolder}/`;
-
         let info = {};
         try {
           const infoRes = await fetch(folderBase + "info.json", { cache: "no-store" });
@@ -887,112 +606,40 @@ if (cardContainer) {
             info = await infoRes.json();
             if (!info || typeof info !== "object") info = {};
           }
-        } catch (err) {
-          // ignore, we'll use fallback values
-        }
-
-        // check cover existence via HEAD
+        } catch (err) {}
         let cover = DEFAULT_COVER;
         try {
           const coverUrl = folderBase + "cover.jpeg";
           const head = await fetch(coverUrl, { method: "HEAD" });
           if (head && head.ok) cover = coverUrl;
-        } catch (err) {
-          // ignore -> default cover
-        }
-
+        } catch (err) {}
         return {
           folder,
           title: info.title && String(info.title).trim() ? String(info.title).trim() : folder,
           desc: info.description && String(info.description).trim() ? String(info.description).trim() : "",
-          cover,
+          cover
         };
-      })
-    );
+      }));
 
-    // remove spinner now that we have metadata
-    if (spinner && spinner.parentNode) spinner.parentNode.removeChild(spinner);
+      if (spinner && spinner.parentNode) spinner.parentNode.removeChild(spinner);
+      const frag = document.createDocumentFragment();
 
-    // build cards off-DOM and append once
-    const frag = document.createDocumentFragment();
+      for (const fi of folderInfos) {
+        const d = document.createElement("div");
+        d.className = "card";
+        d.dataset.folder = fi.folder;
+        d.innerHTML = `
+          <div class="play">
+            <img src="${ICON_PATH}/play.svg" alt="Play Button" />
+          </div>
+          <img class="card-cover" src="${fi.cover}" alt="Card Img" />
+          <h2 class="card-title">${escapeHtml(fi.title)}</h2>
+          <p class="card-desc">${escapeHtml(fi.desc)}</p>
+        `;
 
-    for (const fi of folderInfos) {
-      const d = document.createElement("div");
-      d.className = "card";
-      d.dataset.folder = fi.folder;
-
-      // markup uses the already-fetched title/desc/cover (no placeholders)
-      d.innerHTML = `
-        <div class="play">
-          <img src="${ICON_PATH}/play.svg" alt="Play Button" />
-        </div>
-        <img class="card-cover" src="${fi.cover}" alt="Card Img" />
-        <h2 class="card-title">${escapeHtml(fi.title)}</h2>
-        <p class="card-desc">${escapeHtml(fi.desc)}</p>
-      `;
-
-      // attach click handlers (same behavior as before)
-      d.addEventListener("click", async () => {
-        const songsFromFolder = await getSongs(fi.folder);
-        songs = songsFromFolder;
-        if (songUL) {
-          songUL.innerHTML = "";
-          for (const s of songs) {
-            const filename = s;
-            const base = filename.replaceAll("%20", " ").replace(/\.mp3$/i, "").trim();
-            let artist = "Unknown";
-            let title = base;
-            const parts = base.split(" - ");
-            if (parts.length >= 2) { artist = parts[0].trim(); title = parts.slice(1).join(" - ").trim(); }
-
-            const li = document.createElement("li");
-            li.dataset.file = filename;
-
-            const imgEl = document.createElement("img");
-            imgEl.alt = "Music image"; imgEl.className = "thumb";
-            imgEl.width = 50; imgEl.height = 50;
-            imgEl.style.width = "50px"; imgEl.style.height = "50px";
-            imgEl.style.borderRadius = "6px"; imgEl.style.objectFit = "cover"; imgEl.style.flexShrink = "0";
-            const candidates = buildImageCandidatesFor(filename, fi.folder);
-            setImgSrcWithFallback(imgEl, candidates, DEFAULT_IMAGE);
-
-            const infoDiv = document.createElement("div"); infoDiv.className = "info";
-            const titleDiv = document.createElement("div"); titleDiv.textContent = title; titleDiv.style.fontWeight = "700";
-            const artistDiv = document.createElement("div"); artistDiv.textContent = artist;
-            artistDiv.style.fontSize = "12px"; artistDiv.style.color = "#cfcfcf";
-            artistDiv.style.whiteSpace = "nowrap"; artistDiv.style.overflow = "hidden"; artistDiv.style.textOverflow = "ellipsis";
-            infoDiv.appendChild(titleDiv); infoDiv.appendChild(artistDiv);
-
-            const playNow = document.createElement("div"); playNow.className = "playnow";
-            playNow.innerHTML = `<img class="padPlayBtn" src="${ICON_PATH}/play.svg" alt="Play Now">`;
-
-            li.appendChild(imgEl); li.appendChild(infoDiv); li.appendChild(playNow);
-            enableMarquee(artistDiv);
-
-            li.addEventListener("click", (ev) => {
-              ev.stopPropagation();
-              const file = li.dataset.file;
-              if (!file) return;
-              currentFolder = fi.folder;
-              playMusic(file);
-            });
-
-            songUL.appendChild(li);
-          }
-        }
-        currentFolder = fi.folder;
-        if (songs && songs.length) playMusic(songs[0]);
-      });
-
-      // small play icon inside card: populate left playlist AND play first track
-      const playImg = d.querySelector(".play img");
-      if (playImg) {
-        playImg.addEventListener("click", async (ev) => {
-          ev.stopPropagation();
+        d.addEventListener("click", async () => {
           const songsFromFolder = await getSongs(fi.folder);
           songs = songsFromFolder;
-          currentFolder = fi.folder;
-
           if (songUL) {
             songUL.innerHTML = "";
             for (const s of songs) {
@@ -1027,8 +674,8 @@ if (cardContainer) {
               li.appendChild(imgEl); li.appendChild(infoDiv); li.appendChild(playNow);
               enableMarquee(artistDiv);
 
-              li.addEventListener("click", (ev2) => {
-                ev2.stopPropagation();
+              li.addEventListener("click", (ev) => {
+                ev.stopPropagation();
                 const file = li.dataset.file;
                 if (!file) return;
                 currentFolder = fi.folder;
@@ -1037,8 +684,8 @@ if (cardContainer) {
 
               const padImg = li.querySelector(".padPlayBtn");
               if (padImg) {
-                padImg.addEventListener("click", (ev3) => {
-                  ev3.stopPropagation();
+                padImg.addEventListener("click", (ev) => {
+                  ev.stopPropagation();
                   const file = li.dataset.file;
                   if (!file) return;
                   currentFolder = fi.folder;
@@ -1052,43 +699,90 @@ if (cardContainer) {
               songUL.appendChild(li);
             }
           }
-
+          currentFolder = fi.folder;
           if (songs && songs.length) playMusic(songs[0]);
         });
+
+        const playImg = d.querySelector(".play img");
+        if (playImg) {
+          playImg.addEventListener("click", async (ev) => {
+            ev.stopPropagation();
+            const songsFromFolder = await getSongs(fi.folder);
+            songs = songsFromFolder;
+            currentFolder = fi.folder;
+
+            if (songUL) {
+              songUL.innerHTML = "";
+              for (const s of songs) {
+                const filename = s;
+                const base = filename.replaceAll("%20", " ").replace(/\.mp3$/i, "").trim();
+                let artist = "Unknown";
+                let title = base;
+                const parts = base.split(" - ");
+                if (parts.length >= 2) { artist = parts[0].trim(); title = parts.slice(1).join(" - ").trim(); }
+
+                const li = document.createElement("li");
+                li.dataset.file = filename;
+
+                const imgEl = document.createElement("img");
+                imgEl.alt = "Music image"; imgEl.className = "thumb";
+                imgEl.width = 50; imgEl.height = 50;
+                imgEl.style.width = "50px"; imgEl.style.height = "50px";
+                imgEl.style.borderRadius = "6px"; imgEl.style.objectFit = "cover"; imgEl.style.flexShrink = "0";
+                const candidates = buildImageCandidatesFor(filename, fi.folder);
+                setImgSrcWithFallback(imgEl, candidates, DEFAULT_IMAGE);
+
+                const infoDiv = document.createElement("div"); infoDiv.className = "info";
+                const titleDiv = document.createElement("div"); titleDiv.textContent = title; titleDiv.style.fontWeight = "700";
+                const artistDiv = document.createElement("div"); artistDiv.textContent = artist;
+                artistDiv.style.fontSize = "12px"; artistDiv.style.color = "#cfcfcf";
+                artistDiv.style.whiteSpace = "nowrap"; artistDiv.style.overflow = "hidden"; artistDiv.style.textOverflow = "ellipsis";
+                infoDiv.appendChild(titleDiv); infoDiv.appendChild(artistDiv);
+
+                const playNow = document.createElement("div"); playNow.className = "playnow";
+                playNow.innerHTML = `<img class="padPlayBtn" src="${ICON_PATH}/play.svg" alt="Play Now">`;
+
+                li.appendChild(imgEl); li.appendChild(infoDiv); li.appendChild(playNow);
+                enableMarquee(artistDiv);
+
+                li.addEventListener("click", (ev2) => {
+                  ev2.stopPropagation();
+                  const file = li.dataset.file;
+                  if (!file) return;
+                  currentFolder = fi.folder;
+                  playMusic(file);
+                });
+
+                const padImg = li.querySelector(".padPlayBtn");
+                if (padImg) {
+                  padImg.addEventListener("click", (ev3) => {
+                    ev3.stopPropagation();
+                    const file = li.dataset.file;
+                    if (!file) return;
+                    currentFolder = fi.folder;
+                    playMusic(file);
+                  });
+                  padImg.style.transition = "transform 160ms ease";
+                  padImg.addEventListener("mouseenter", () => (padImg.style.transform = "scale(1.12)"));
+                  padImg.addEventListener("mouseleave", () => (padImg.style.transform = "scale(1)"));
+                }
+
+                songUL.appendChild(li);
+              }
+            }
+
+            if (songs && songs.length) playMusic(songs[0]);
+          });
+        }
+
+        frag.appendChild(d);
       }
 
-      frag.appendChild(d);
-    }
+      cardContainer.appendChild(frag);
+    })();
+  }
 
-    cardContainer.appendChild(frag);
-  })();
-}
-
-
-
-
-
-
-
-
-
-
-
-
-  
-
-
-
-
-  
-
-
-  
-
-
-  
-
-  // initial left playlist render
+  // initial left playlist render (Trending)
   if (songUL) {
     songUL.innerHTML = "";
     for (const song of songs) {
@@ -1123,6 +817,7 @@ if (cardContainer) {
       li.appendChild(imgEl); li.appendChild(infoDiv); li.appendChild(playNow);
       enableMarquee(artistDiv);
 
+      // toggle behavior on li click
       li.addEventListener("click", (ev) => {
         ev.stopPropagation();
         const file = li.dataset.file;
@@ -1137,17 +832,38 @@ if (cardContainer) {
         }
       });
 
+      // pad button click behavior
+      const padImg = li.querySelector(".padPlayBtn");
+      if (padImg) {
+        padImg.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          const file = li.dataset.file;
+          if (!file) return;
+          const currentFileEncoded = currentSong.src.split("/").slice(-1)[0] || "";
+          const currentFile = decodeURIComponent(currentFileEncoded);
+          if (currentFile === file) {
+            if (currentSong.paused) currentSong.play().catch(()=>{});
+            else currentSong.pause();
+          } else {
+            playMusic(file);
+          }
+        });
+        padImg.style.transition = "transform 160ms ease";
+        padImg.addEventListener("mouseenter", () => (padImg.style.transform = "scale(1.12)"));
+        padImg.addEventListener("mouseleave", () => (padImg.style.transform = "scale(1)"));
+      }
+
       songUL.appendChild(li);
     }
   }
 
-  // make sure first trending track loads into playbar (paused)
+  // ensure first trending track loads (paused)
   if (songs && songs.length) {
     if (!currentFolder) currentFolder = "Trending";
     playMusic(songs[0], true);
   }
 
-  // main play/pause button behavior
+  // play/pause main button
   if (playButton) {
     playButton.addEventListener("click", () => {
       if (!currentSong.src || currentSong.src === "") {
@@ -1191,6 +907,7 @@ if (cardContainer) {
     if (li) {
       const btn = getPadPlayImg(li);
       if (btn && btn.tagName && btn.tagName.toLowerCase() === "img") btn.src = `${ICON_PATH}/play.svg`;
+      li.classList.remove("playing");
     }
     const card = document.querySelector(`.card[data-folder="${CSS.escape(currentFolder)}"]`);
     if (card) {
@@ -1209,7 +926,7 @@ if (cardContainer) {
     if (seekFillEl) seekFillEl.style.width = pct + "%";
   });
 
-  // seekbar click & drag
+  // seekbar interactions (click/drag)
   if (seekbarEl) {
     seekbarEl.addEventListener("click", (e) => {
       const rect = seekbarEl.getBoundingClientRect();
@@ -1259,13 +976,52 @@ if (cardContainer) {
     window.addEventListener("touchend", () => { if (!isDragging) return; isDragging = false; if (isFinite(currentSong.duration) && currentSong.duration > 0 && pendingSeekPercent !== null) currentSong.currentTime = currentSong.duration * pendingSeekPercent; if (wasPlayingBeforeDrag) currentSong.play().catch(()=>{}); pendingSeekPercent = null; });
   }
 
-  // hamburger & close (for small screens)
-  const ham = document.querySelector(".hamburger");
-  const closeBtn = document.querySelector(".close");
-  if (ham) ham.addEventListener("click", () => { document.querySelector(".left").style.left = "0"; });
-  if (closeBtn) closeBtn.addEventListener("click", () => { document.querySelector(".left").style.left = "-120%"; });
+  // // hamburger & close
+  // const ham = document.querySelector(".hamburger");
+  // const closeBtn = document.querySelector(".close");
+  // if (ham) ham.addEventListener("click", () => { document.querySelector(".left").style.left = "0"; });
+  // if (closeBtn) closeBtn.addEventListener("click", () => { document.querySelector(".left").style.left = "-120%"; });
 
-  // previous & next
+
+  // hamburger & close — toggle .open class so CSS can handle z-index/padding
+const ham = document.querySelector(".hamburger");
+const closeBtn = document.querySelector(".close");
+const leftPane = document.querySelector(".left");
+
+if (ham && leftPane) {
+  ham.addEventListener("click", () => {
+    // add class to show left pane (CSS handles left:0 and z-index)
+    leftPane.classList.add("open");
+    // ensure left is visually on screen in case other code manipulates style.left
+    leftPane.style.left = "0";
+    // optional: focus first element or prevent body scroll
+    document.body.style.overflow = "hidden";
+  });
+}
+
+if (closeBtn && leftPane) {
+  closeBtn.addEventListener("click", () => {
+    leftPane.classList.remove("open");
+    leftPane.style.left = "-120%";
+    document.body.style.overflow = ""; // restore
+  });
+}
+
+// also close the left pane if user taps outside it (nice UX)
+document.addEventListener("click", (ev) => {
+  // if left is open and click happened outside .left and not on hamburger, close it
+  if (!leftPane || !leftPane.classList.contains("open")) return;
+  const target = ev.target;
+  if (target.closest && (target.closest(".left") || target.closest(".hamburger"))) return;
+  leftPane.classList.remove("open");
+  leftPane.style.left = "-120%";
+  document.body.style.overflow = "";
+});
+
+
+
+
+  // prev & next buttons
   if (prevButton) {
     prevButton.addEventListener("click", () => {
       const currentFileEncoded = currentSong.src.split("/").slice(-1)[0] || "";
@@ -1292,7 +1048,7 @@ if (cardContainer) {
     });
   }
 
-  // VOLUME controls wiring
+  // VOLUME wiring
   const volSeekbarEl = volSeekbar;
   const volSeekfillEl = volSeekfill;
   const volCircleEl = volCircle;
@@ -1341,7 +1097,7 @@ if (cardContainer) {
     window.addEventListener("touchend", () => { dragging = false; });
   }
 
-  // mute/unmute icon
+  // mute/unmute
   let prevVolForMute = 1;
   const volIcon = document.querySelector(".volumeRocker img");
   if (volIcon) {
@@ -1376,3 +1132,4 @@ if (cardContainer) {
 } // end main
 
 main().catch((err) => console.error(err));
+
